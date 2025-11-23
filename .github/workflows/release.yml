@@ -26,9 +26,9 @@ on:
         default: false
         required: true
         type: boolean
-  schedule:
-    # Release alpha every day at 20:00 UTC (4:00 AM UTC+8)
-    - cron: "0 20 * * *"
+  # schedule:
+  #   # Release alpha every day at 20:00 UTC (4:00 AM UTC+8)
+  #   - cron: "0 20 * * *"
 
 defaults:
   run:
