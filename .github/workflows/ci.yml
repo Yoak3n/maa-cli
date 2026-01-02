@@ -30,40 +30,66 @@ env:
   RUST_BACKTRACE: full
   CARGO_TERM_COLOR: always
 
+permissions:
+  contents: read
+
 defaults:
   run:
     shell: bash
 
 jobs:
-  format:
-    name: Format Check
+  typos:
+    name: Lint (typos)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
+      - name: Run typos
+        uses: crate-ci/typos@v1
+
+  format:
+    name: Lint (format)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
       - name: Format Check
         run: |
           rustup toolchain install nightly --profile minimal --component rustfmt
           cargo +nightly fmt -- --check
 
+  deny:
+    name: Lint (cargo deny)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+      - name: Check
+        run: cargo deny check
+
   build:
-    name: Build and Test
-    runs-on: ${{ matrix.os }}
+    name: Build and Test (${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
-        os:
+        runner:
           - ubuntu-22.04
-          - macos-13 # x86_64 runner
-          - macos-latest # aarch64 runner
+          - ubuntu-22.04-arm
+          - macos-15-intel
+          - macos-latest
           - windows-latest
     env:
       MAA_EXTRA_SHARE_NAME: maa-test
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
-      - name: Setup Toolchains
-        uses: ./.github/actions/setup
+        uses: actions/checkout@v6
+      - name: Update Rust
+        run: rustup update stable
       - name: Setup Cache
         uses: Swatinem/rust-cache@v2
       - name: Build (maa-cli)
@@ -78,50 +104,52 @@ jobs:
         run: |
           cargo run --package maa-cli -- install beta
           core_dir=$(cargo run -- dir library)
-          resource_dir=$(cargo run -- dir resource)
           cache_dir=$(cargo run -- dir cache)
           package_name=$(basename "$cache_dir"/MAA-v*)
-          version=${package_name#MAA-v}
-          version=${version%%-linux*}
-          version=${version%%-macos*}
-          version=${version%%-win*}
-          ls -l "$core_dir"
-          ls -l "$resource_dir"
-          ls -l "$cache_dir"
+          version=$(echo "$package_name" | sed -E 's/^MAA-v(.+)-(linux|macos|win)-.*/\1/')
           echo "Downloaded MaaCore version: $version"
           {
             echo "MAA_CORE_DIR=$core_dir"
-            echo "MAA_RESOURCE_DIR=$resource_dir"
             echo "MAA_CORE_VERSION=v$version"
           } >> "$GITHUB_ENV"
       - name: Test
+        env:
+          SKIP_CORE_TEST: ${{ matrix.runner == 'windows-11-arm' }}
         run: |
           cargo test -- --include-ignored
 
-  build-cross:
-    name: Cross Build
+  build-tier2:
+    name: Build and Test (Tier 2, ${{ matrix.runner }})
     needs: [build]
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
-        os:
-          - ubuntu-22.04
-          - windows-latest
+        runner:
+          - windows-11-arm
+    env:
+      MAA_EXTRA_SHARE_NAME: maa-test
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
-      - name: Setup Toolchains
-        uses: ./.github/actions/setup
-        with:
-          target_arch: aarch64
-      - name: Build
+        uses: actions/checkout@v6
+      - name: Update Rust
+        run: rustup update stable
+      - name: Setup Cache
+        uses: Swatinem/rust-cache@v2
+      - name: Build (maa-cli)
         run: |
-          cargo build --package maa-cli --locked \
-            --features vendored-openssl
+          cargo build --locked
+      - name: Lint (clippy)
+        run: |
+          cargo clippy -- -D warnings
+      - name: Test
+        env:
+          SKIP_CORE_TEST: true
+        run: |
+          cargo test -- --include-ignored
 
   build-no-default-features:
-    name: Build and Test (${{ matrix.feature }})
+    name: Build and Test (feature=${{ matrix.feature }})
     needs: [build]
     runs-on: ubuntu-22.04
     strategy:
@@ -132,9 +160,9 @@ jobs:
           - git2 # disabled both cli_installer and core_installer, used by appimage
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v5
-      - name: Setup Toolchains
-        uses: ./.github/actions/setup
+        uses: actions/checkout@v6
+      - name: Update Rust
+        run: rustup update stable
       - name: Build and Test
         env:
           SKIP_CORE_TEST: true
@@ -151,12 +179,11 @@ jobs:
       matrix:
         os:
           - ubuntu-22.04
-          - macos-13 # x86_64 runner
-          - macos-latest # aarch64 runner
+          - macos-latest
           - windows-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
       - name: Setup Toolchains
         uses: ./.github/actions/setup
       - name: Install MaaCore
@@ -198,28 +225,40 @@ jobs:
       matrix:
         os:
           - ubuntu-22.04
-          - macos-latest # aarch64 runner
+          - macos-latest
           - windows-latest
     env:
       MAA_EXTRA_SHARE_NAME: maa-test
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
-      - name: Setup Toolchains
-        uses: ./.github/actions/setup
-      - name: Setup Cache
-        uses: Swatinem/rust-cache@v2
-      - name: Install MaaCore
-        uses: ./.github/actions/install-core
+        uses: actions/checkout@v6
+      - name: Use Nightly Toolchain
+        run: rustup default nightly
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-llvm-cov
-      - name: Coverage
+      - name: Cleanup Coverage Artifacts
+        run: cargo llvm-cov clean --workspace
+      - name: Install MaaCore
+        env:
+          MAA_CONFIG_DIR: ${{ github.workspace }}/crates/maa-cli/config_examples
         run: |
-          cargo +nightly llvm-cov --workspace \
-            --codecov --output-path codecov.json \
-            -- --include-ignored
+          cargo llvm-cov run --package maa-cli --no-report -- install beta
+          core_dir=$(cargo run -- dir library)
+          cache_dir=$(cargo run -- dir cache)
+          package_name=$(basename "$cache_dir"/MAA-v*)
+          version=$(echo "$package_name" | sed -E 's/^MAA-v(.+)-(linux|macos|win)-.*/\1/')
+          echo "Downloaded MaaCore version: $version"
+          {
+            echo "MAA_CORE_DIR=$core_dir"
+            echo "MAA_CORE_VERSION=v$version"
+          } >> "$GITHUB_ENV"
+      - name: Run Tests
+        run: cargo llvm-cov --workspace --no-report -- --include-ignored
+      - name: Generate Coverage Report
+        run: |
+          cargo llvm-cov report --codecov --output-path codecov.json
       - name: Upload to Codecov
         uses: codecov/codecov-action@v5
         with:

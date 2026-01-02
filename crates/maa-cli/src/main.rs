@@ -4,6 +4,8 @@ use maa_dirs as dirs;
 #[macro_use(join)]
 extern crate maa_dirs;
 
+mod state;
+
 mod log;
 
 mod activity;
@@ -12,7 +14,6 @@ mod command;
 mod config;
 mod installer;
 mod run;
-mod value;
 
 use anyhow::{Context, Result};
 use clap::{CommandFactory, Parser};
@@ -25,25 +26,30 @@ fn main() -> Result<()> {
     cli.log.init_logger()?;
 
     if cli.batch {
-        value::userinput::enable_batch_mode()
+        maa_value::userinput::enable_batch_mode()
     }
 
     match cli.command {
         #[cfg(feature = "core_installer")]
         Command::Install { force, common } => {
             installer::maa_core::install(force, &common)?;
+            installer::hot_update::update()?;
             installer::resource::update(false)?;
         }
         #[cfg(feature = "core_installer")]
         Command::Update { common } => {
             installer::maa_core::update(&common)?;
+            installer::hot_update::update()?;
             installer::resource::update(false)?;
         }
         #[cfg(feature = "cli_installer")]
         Command::SelfC(self_c) => match self_c {
             command::SelfCommand::Update { common } => installer::maa_cli::update(&common)?,
         },
-        Command::HotUpdate => installer::resource::update(false)?,
+        Command::HotUpdate => {
+            installer::hot_update::update()?;
+            installer::resource::update(false)?;
+        }
         Command::Dir { dir } => match dir {
             Dir::Data => println!("{}", dirs::data().display()),
             Dir::Library => {
@@ -60,23 +66,28 @@ fn main() -> Result<()> {
                         .display()
                 )
             }
-            Dir::HotUpdate => println!("{}", dirs::hot_update().display()),
+            Dir::HotUpdate => println!("{}", dirs::maa_resource().display()),
             Dir::Config => println!("{}", dirs::config().display()),
             Dir::Cache => println!("{}", dirs::cache().display()),
             Dir::Log => println!("{}", dirs::log().display()),
         },
-        Command::Version { component } => match component {
-            Component::All => {
-                println!("maa-cli v{}", env!("MAA_VERSION"));
-                println!("MaaCore {}", run::core_version()?);
+        Command::Version { component } => {
+            match component {
+                Component::All | Component::MaaCLI => {
+                    println!("maa-cli v{}", state::CLI_VERSION_STR)
+                }
+                _ => {}
             }
-            Component::MaaCLI => {
-                println!("maa-cli v{}", env!("MAA_VERSION"));
+            match component {
+                Component::All | Component::MaaCore => println!(
+                    "MaaCore {}",
+                    state::CORE_VERSION_STR
+                        .as_deref()
+                        .context("Failed to get MaaCore version")?
+                ),
+                _ => {}
             }
-            Component::MaaCore => {
-                println!("MaaCore {}", run::core_version()?);
-            }
-        },
+        }
         Command::Run { task, common } => run::run_custom(task, common)?,
         Command::StartUp { params, common } => run::run_preset(params, common)?,
         Command::CloseDown { params, common } => run::run_preset(params, common)?,
